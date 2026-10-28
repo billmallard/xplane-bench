@@ -19,7 +19,6 @@ param(
     [int]$Port = 8770
 )
 $ErrorActionPreference = "Stop"
-$py = (Get-Command python).Source
 
 if (-not (Test-Path "$Repo\config.local.yaml")) { throw "config.local.yaml missing -- copy config.example.yaml and fill in tokens" }
 
