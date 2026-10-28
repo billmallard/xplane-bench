@@ -1,0 +1,15 @@
+# Copy to config.local.yaml (git-ignored) and fill in tokens.
+listen: 0.0.0.0
+port: 8770
+tokens:                       # bearer token -> requester name, one per agent
+  "REPLACE-WITH-A-LONG-RANDOM-STRING": AVIONICS
+  "REPLACE-WITH-ANOTHER": QA
+allowed_ips: [10.110.10.6]    # the QNAP (agents); add bench IPs if they call directly
+window: {tz: America/Chicago, start: "23:00", end: "06:00"}
+profile_dirs:                 # bare profile names are looked up here
+  - D:/Users/wpballard/Documents/github/MAOS/makerplane/fix-gateway/src/fixgw/sim/profiles
+runs: D:/Users/wpballard/Documents/github/xplane-bench/runs
+xplane: C:/X-Plane 12
+hands_off_file: D:/Users/wpballard/Documents/github/xplane-bench/HANDS_OFF
+max_session_s: 2700
+default_aircraft: sr22

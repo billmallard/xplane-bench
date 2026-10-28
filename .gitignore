@@ -1,0 +1,8 @@
+plugin/sdk/
+plugin/out/
+__pycache__/
+*.pyc
+runs/
+config.local.*
+runs/
+runs_*.log
