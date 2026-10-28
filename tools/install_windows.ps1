@@ -20,8 +20,6 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $py = (Get-Command python).Source
-# The Microsoft Store Python runs from an alias; the real binary is what listens.
-$pyReal = (& $py -c "import sys; print(sys.executable)").Trim()
 
 if (-not (Test-Path "$Repo\config.local.yaml")) { throw "config.local.yaml missing -- copy config.example.yaml and fill in tokens" }
 
@@ -29,9 +27,19 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($admin) {
     Get-NetFirewallRule -DisplayName "xplane-bench service" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    # Port + source address, no -Program: a Microsoft Store Python runs from a
+    # versioned path under Program Files\WindowsApps that changes on every
+    # update, and sys.executable reports the AppData alias, which never matches.
     New-NetFirewallRule -DisplayName "xplane-bench service" -Direction Inbound -Action Allow -Protocol TCP `
-        -LocalPort $Port -RemoteAddress $AllowFrom -Program $pyReal -Profile Any | Out-Null
-    Write-Host "firewall: TCP $Port open to $($AllowFrom -join ', ') for $pyReal"
+        -LocalPort $Port -RemoteAddress $AllowFrom -Profile Any | Out-Null
+    Write-Host "firewall: TCP $Port open to $($AllowFrom -join ', ')"
+    # A broader inbound allow for Python (often left by an "Allow" click on a
+    # Windows prompt) still admits other addresses; list it so the owner decides.
+    Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True |
+        Where-Object { $_.DisplayName -like "*python*" } | ForEach-Object {
+            $addr = ($_ | Get-NetFirewallAddressFilter).RemoteAddress -join ","
+            Write-Warning "broader rule also admits Python: '$($_.DisplayName)' remote=$addr profile=$($_.Profile)"
+        }
 } else {
     Write-Warning "not elevated: skipped the firewall rule. Re-run as administrator to open port $Port to the QNAP."
 }
