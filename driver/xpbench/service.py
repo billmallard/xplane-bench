@@ -11,8 +11,9 @@ the hands-off flag file exists, nothing starts.
 
 HTTP API (bearer token on every call except /health):
     GET  /health                    who is flying, the queue, the window, hands-off
-    POST /sessions                  {"profile": "<name or path>", "issue": "AER-123",
-                                     "aircraft": "sr22"} -> {"id", "position"}
+    POST /sessions                  {"profile": "<name>" | "profile_yaml": "<text>",
+                                     "issue": "AER-123", "aircraft": "sr22"}
+                                    -> {"id", "position", "blocked_now"}
     GET  /sessions/{id}             state + result.json once finished
     GET  /sessions/{id}/timeline    timeline.jsonl
     GET  /sessions/{id}/truth       truth.jsonl (X-Plane's own navigator, 5 Hz)
@@ -97,9 +98,21 @@ class Bench:
 
     # ---- queue -----------------------------------------------------------------
     def submit(self, requester, body):
-        path = self.resolve_profile(body["profile"])
-        with open(path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
+        if body.get("profile_yaml"):
+            # inline profile: agents cannot write to this workstation, so a new
+            # scenario travels in the request and is kept with the queue entry
+            raw = yaml.safe_load(body["profile_yaml"])
+            if not isinstance(raw, dict) or "name" not in raw:
+                raise ValueError("profile_yaml must be a profile with a name")
+            inbox = os.path.join(self.cfg["runs"], "inline_profiles")
+            os.makedirs(inbox, exist_ok=True)
+            path = os.path.join(inbox, f"{uuid.uuid4().hex[:8]}-{raw['name']}.yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body["profile_yaml"])
+        else:
+            path = self.resolve_profile(body["profile"])
+            with open(path, encoding="utf-8") as f:
+                raw = yaml.safe_load(f)
         aircraft = body.get("aircraft", self.cfg["default_aircraft"])
         if aircraft not in AIRCRAFT:
             raise ValueError(f"aircraft must be one of {sorted(AIRCRAFT)}")

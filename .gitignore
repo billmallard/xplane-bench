@@ -6,3 +6,6 @@ runs/
 config.local.*
 runs/
 runs_*.log
+profiles.local/
+HANDS_OFF
+service.log

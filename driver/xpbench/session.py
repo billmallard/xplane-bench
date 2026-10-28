@@ -380,8 +380,21 @@ class Session:
         if c["phase"] == "recouple":
             return st["hmode"] == 2
 
+    @staticmethod
+    def _keep_awake(on):
+        """Hold the PC awake (and the display on: X-Plane renders) for the
+        session -- Bill's ruling 3, 2026-10-28. Windows only; no-op elsewhere."""
+        try:
+            import ctypes
+            ES_CONTINUOUS, ES_SYSTEM, ES_DISPLAY = 0x80000000, 0x00000001, 0x00000002
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | (ES_SYSTEM | ES_DISPLAY if on else 0))
+        except Exception:
+            pass
+
     def run(self):
         outcome, reason = "error", None
+        self._keep_awake(True)
         try:
             self.setup()
             self.engage()
@@ -402,6 +415,7 @@ class Session:
             with open(os.path.join(self.dir, "result.json"), "w") as f:
                 json.dump(self.result, f, indent=2)
             self._tl.close()
+            self._keep_awake(False)
         return self.result
 
 
