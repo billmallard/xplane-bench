@@ -208,22 +208,52 @@ class Session:
         self.xp.set("xpbench/speed/target_kias", float(kias))
 
     # ---- the flight ------------------------------------------------------------
+    def _expand_route(self, near):
+        """The profile's en-route items as plan entries (ident, kind, via, lat,
+        lon), every airway expanded to the fixes it passes through."""
+        out = []
+        for item in self.p.enroute:
+            if item["kind"] == "waypoint":
+                lat, lon, kind = self.nav.point(item["fix"], near=near)
+                out.append((item["fix"], kind, "DRCT", lat, lon))
+                near = (lat, lon)
+                continue
+            for ident, region in self.nav.airway(item["id"], out[-1][0], item["exit"])[1:]:
+                lat, lon, kind = self.nav.point(ident, near=near, region=region)
+                out.append((ident, kind, item["id"], lat, lon))
+                near = (lat, lon)
+        return out
+
     def setup(self):
         p, nav = self.p, self.nav
         if p.cifp_cycle and p.cifp_cycle != nav.cycle:
             self.note("nav cycle mismatch: X-Plane flies its own data", xplane=nav.cycle, profile=p.cifp_cycle)
-        self.app = nav.approach(p.airport, p.approach, p.transition)
-        self.legs = [l.fix for l in self.app.legs]
-        i = self.app.index_of(p.start_fix)
-        prev, fix = self.app.legs[i - 1], self.app.legs[i]
-        crs = bearing((prev.lat, prev.lon), (fix.lat, fix.lon))
-        start = offset((fix.lat, fix.lon), (crs + 180) % 360, p.start_before_nm)
+        self.app = nav.approach(p.airport, p.approach, p.transition) if p.approach else None
+        self.legs = [l.fix for l in self.app.legs] if self.app else []
+        dep = p.departure or ("KSBA" if p.airport != "KSBA" else "KSMX")
+        dep_pos = nav.runway(dep, self._any_rwy(dep))
+        self.route = self._expand_route(dep_pos) if p.enroute else []
+        route_ids = [r[0] for r in self.route]
+        self.start_route_idx = self.start_idx = None
+        if p.start_fix in route_ids:
+            # start on the en-route part, inbound to that fix along the route
+            k = self.start_route_idx = route_ids.index(p.start_fix)
+            fix_ll = self.route[k][3:5]
+            prev_ll = self.route[k - 1][3:5] if k else dep_pos
+            self.note("route", fixes=route_ids, start_at=p.start_fix)
+        else:
+            if not self.app:
+                raise XPlaneError(f"start fix {p.start_fix} is not on the route {route_ids}")
+            i = self.start_idx = self.app.index_of(p.start_fix)
+            prev, fix = self.app.legs[i - 1], self.app.legs[i]
+            prev_ll, fix_ll = (prev.lat, prev.lon), (fix.lat, fix.lon)
+        crs = bearing(prev_ll, fix_ll)
+        start = offset(fix_ll, (crs + 180) % 360, p.start_before_nm)
         flight = {"aircraft": {"path": self.ac["path"]},
                   "lle_air_start": {"latitude": start[0], "longitude": start[1],
                                     "elevation_in_meters": p.start_alt_ft / FT_PER_M,
                                     "heading_true": crs,
                                     "speed_in_meters_per_second": self.ac["cruise_kias"] * 0.514444}}
-        self.start_idx = i
         self.xp = self.launcher.start(flight, self.dir)
         xp = self.xp
         # power first; the air start only initialises on the first unpaused
@@ -238,22 +268,37 @@ class Session:
         xp.wait_flying(0.8 * self.ac["cruise_kias"], wait_s=60)
         xp.pause(True)
         # flight plan
-        dep = "KSBA" if p.airport != "KSBA" else "KSMX"
-        rwy = next((l.fix for l in self.app.legs if l.fix.startswith("RW")), None)
-        plan = fmsplan.approach_plan(nav.cycle, dep, nav.runway(dep, self._any_rwy(dep)), p.airport,
-                                     nav.runway(p.airport, rwy), p.approach, p.transition, rwy)
+        rwy = next((l.fix for l in self.app.legs if l.fix.startswith("RW")), None) if self.app else None
+        dest_pos = nav.runway(p.airport, rwy or self._any_rwy(p.airport))
+        if self.route:
+            plan = fmsplan.route_plan(nav.cycle, dep, dep_pos, p.airport, dest_pos, self.route,
+                                      p.approach, p.transition, rwy)
+        else:
+            plan = fmsplan.approach_plan(nav.cycle, dep, dep_pos, p.airport, dest_pos,
+                                         p.approach, p.transition, rwy)
         with open(os.path.join(self.dir, "plan.fms"), "w") as f:
             f.write(plan)
         xp.set_str("xpbench/fms/plan_in", plan)
         xp.cmd("xpbench/fms/load")
         time.sleep(4)
-        loaded = self.entries("A")
-        self.note("fms loaded", approach=loaded)
-        want = [l for l in self.legs if l]
-        if [x for x in loaded if x and not x.startswith("(")] != want:
-            raise XPlaneError(f"X-Plane's approach {loaded} differs from the CIFP legs {want}")
-        xp.set("xpbench/fms/plan_sel", 2)
-        xp.set("xpbench/fms/dest", i)
+        if self.app:
+            loaded = self.entries("A")
+            self.note("fms loaded", approach=loaded)
+            want = [l for l in self.legs if l]
+            if [x for x in loaded if x and not x.startswith("(")] != want:
+                raise XPlaneError(f"X-Plane's approach {loaded} differs from the CIFP legs {want}")
+        if self.route:
+            primary = self.entries("P")
+            self.note("fms loaded (en route)", primary=primary)
+            want = [dep] + route_ids + [p.airport]
+            if primary != want:
+                raise XPlaneError(f"X-Plane's primary plan {primary} differs from the route {want}")
+        if self.start_route_idx is not None:
+            xp.set("xpbench/fms/plan_sel", 0)
+            xp.set("xpbench/fms/dest", self.start_route_idx + 1)  # entry 0 is the departure airport
+        else:
+            xp.set("xpbench/fms/plan_sel", 2)
+            xp.set("xpbench/fms/dest", self.start_idx)
         xp.set_str("xpbench/log/path", os.path.join(self.dir, "truth.jsonl"))
         xp.cmd("xpbench/log/start")
 
@@ -295,6 +340,58 @@ class Session:
         xp.set("xpbench/guard/watch_ground", 1)
         self.note("autopilot coupled to GPS", ias=round(st["ias"]), alt_ft=round(st["alt_ft"]))
 
+    def fly_enroute(self):
+        """Fly the en-route entries on the primary plan, coupled to GPSS.
+
+        Returns (outcome, reason) to end the session -- after ``end.after_fix``,
+        at the end of a route with no procedure, or on a guard -- or None once
+        the last en-route fix is behind, after activating the approach for
+        ``fly()``. The approach is activated by the driver, as a pilot would,
+        rather than relying on X-Plane to move from the primary plan into the
+        approach plan on its own."""
+        p, xp = self.p, self.xp
+        ids = [r[0] for r in self.route]
+        last = len(ids)                       # primary-plan index of the last en-route entry
+        end_k = ids.index(p.end_after_fix) + 1 if p.end_after_fix in ids else None
+        last_dest, dme_hist = None, []
+        while True:
+            time.sleep(1.0)
+            st = xp.state()
+            now = time.time()
+            if st["tripped"]:
+                return "aborted", TRIPPED.get(int(st["tripped"]), "guard")
+            if now - self.t_fly > p.max_s:
+                return "timeout", f"max_s {p.max_s} reached"
+            if self.should_stop():
+                return "cancelled", "cancelled by the requester"
+            self.supervise_vertical(st)
+            dest = int(st["dest"])
+            coupled = st["hmode"] == 2
+            if dest != last_dest:
+                name = ids[dest - 1] if 1 <= dest <= last else p.airport
+                self.note("sequence", plan="primary", dest=dest, fix=name)
+                self.result["sequence"].append({"t": round(now - self.t0, 1), "plan": "primary",
+                                                "dest": dest, "fix": name})
+                last_dest, dme_hist = dest, []
+            if end_k is not None and dest > end_k:
+                return "complete", None
+            if dest > last:
+                if not self.app:
+                    return "complete", None
+                xp.set("xpbench/fms/plan_sel", 2)
+                xp.set("xpbench/fms/direct_to", 0)
+                self.note("approach activated", direct_to=self.app.legs[0].fix)
+                return None
+            # flying away from the active entry while coupled: not navigating
+            dme_hist.append((now, st["dme_nm"], coupled))
+            dme_hist[:] = [h for h in dme_hist if now - h[0] <= 60]
+            if coupled and len(dme_hist) > 50 and all(h[2] for h in dme_hist) \
+                    and st["dme_nm"] - dme_hist[0][1] > 1.0:
+                return "aborted", f"flying away from {ids[dest - 1] if 1 <= dest <= last else dest} for 60 s while coupled"
+            if st["alt_ft"] < 500:
+                xp.pause(True)
+                return "aborted", f"below 500 ft MSL ({st['alt_ft']:.0f})"
+
     def fly(self):
         p, xp, legs = self.p, self.xp, self.app.legs
         faf = next(i for i, l in enumerate(legs) if l.role == "FAF")
@@ -307,7 +404,7 @@ class Session:
         offset_ctl = None
         vert_done = set()
         dme_hist, from_since, abeam_done = [], None, set()
-        t_start = time.time()
+        t_start = self.t_fly
         while True:
             time.sleep(1.0)
             st = xp.state()
@@ -466,7 +563,9 @@ class Session:
         try:
             self.setup()
             self.engage()
-            outcome, reason = self.fly()
+            self.t_fly = time.time()
+            ended = self.fly_enroute() if self.start_route_idx is not None else None
+            outcome, reason = ended or self.fly()
         except Exception as e:
             outcome, reason = "error", f"{type(e).__name__}: {e}"
         finally:

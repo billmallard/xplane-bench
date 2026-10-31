@@ -47,8 +47,10 @@ class NavData:
         # Custom Data (a navdata subscription) wins over the default data, as in X-Plane
         self.fix_file = self._pick(custom, base, "earth_fix.dat")
         self.cifp_dir = self._pick(custom, base, "CIFP")
+        self.awy_file = self._pick(custom, base, "earth_awy.dat")
         self.cycle = self._cycle(self.fix_file)
         self._fixes = None
+        self._awys = None
 
     @staticmethod
     def _pick(custom, base, name):
@@ -68,6 +70,13 @@ class NavData:
         """(lat, lon) of a fix. A terminal fix of ``airport`` wins; otherwise,
         among same-named fixes (WINCH exists in California and New Zealand),
         the one nearest ``near``."""
+        lat, lon, _ = self.point(ident, airport, near)
+        return lat, lon
+
+    def point(self, ident, airport=None, near=None, region=None):
+        """(lat, lon, kind) of a fix, VOR or NDB; ``kind`` is "FIX", "VOR" or
+        "NDB" (an .fms entry needs it). ``region`` (the ICAO region an airway
+        record names) narrows same-named candidates first."""
         if self._fixes is None:
             self._fixes = {}
             with open(self.fix_file, encoding="latin-1") as f:
@@ -75,28 +84,73 @@ class NavData:
                     p = line.split()
                     if len(p) >= 5:
                         try:
-                            self._fixes.setdefault(p[2], []).append((float(p[0]), float(p[1]), p[3]))
+                            self._fixes.setdefault(p[2], []).append(
+                                (float(p[0]), float(p[1]), p[3], "FIX", p[4]))
                         except ValueError:
                             pass
-            # VORs and NDBs live in earth_nav.dat: row code, lat, lon, elev, freq, class, var, ident
+            # VORs and NDBs live in earth_nav.dat:
+            # row code, lat, lon, elev, freq, class, var, ident, terminal, region, name
             with open(self.fix_file.replace("earth_fix.dat", "earth_nav.dat"), encoding="latin-1") as f:
                 for line in f:
                     p = line.split()
                     if len(p) >= 8 and p[0] in ("2", "3"):
                         try:
-                            self._fixes.setdefault(p[7], []).append((float(p[1]), float(p[2]), "ENRT"))
+                            self._fixes.setdefault(p[7], []).append(
+                                (float(p[1]), float(p[2]), "ENRT", "VOR" if p[0] == "3" else "NDB",
+                                 p[9] if len(p) > 9 else ""))
                         except ValueError:
                             pass
         cands = self._fixes.get(ident, [])
+        if region:
+            cands = [c for c in cands if c[4] == region] or cands
         if not cands:
             raise KeyError(ident)
         terminal = [c for c in cands if airport and c[2] == airport]
         if terminal:
-            return terminal[0][0], terminal[0][1]
-        if near is not None:
-            best = min(cands, key=lambda c: (c[0] - near[0]) ** 2 + ((c[1] - near[1]) * math.cos(math.radians(near[0]))) ** 2)
-            return best[0], best[1]
-        return cands[0][0], cands[0][1]
+            c = terminal[0]
+        elif near is not None:
+            c = min(cands, key=lambda c: (c[0] - near[0]) ** 2 + ((c[1] - near[1]) * math.cos(math.radians(near[0]))) ** 2)
+        else:
+            c = cands[0]
+        return c[0], c[1], c[3]
+
+    def airway(self, ident, entry, exit_):
+        """The fixes along airway ``ident`` from ``entry`` to ``exit_``, both
+        included, as [(fix, region), ...] -- the shortest hop path through
+        earth_awy.dat. KeyError if the airway does not join them."""
+        if self._awys is None:
+            # earth_awy.dat (1100): fix1 region1 type1 fix2 region2 type2 dir level base top NAMES
+            # where NAMES joins every airway sharing the segment with "-" (V208-V27-V458)
+            self._awys = {}
+            with open(self.awy_file, encoding="latin-1") as f:
+                for line in f:
+                    p = line.split()
+                    if len(p) < 11:
+                        continue
+                    a, b = (p[0], p[1]), (p[3], p[4])
+                    for name in p[10].split("-"):
+                        g = self._awys.setdefault(name, {})
+                        g.setdefault(a, set()).add(b)
+                        g.setdefault(b, set()).add(a)
+        g = self._awys.get(ident)
+        if not g:
+            raise KeyError(f"no airway {ident}")
+        starts = [n for n in g if n[0] == entry]
+        prev = {s: None for s in starts}
+        queue = list(starts)
+        while queue:
+            n = queue.pop(0)
+            if n[0] == exit_:
+                path = []
+                while n:
+                    path.append(n)
+                    n = prev[n]
+                return path[::-1]
+            for m in sorted(g[n]):
+                if m not in prev:
+                    prev[m] = n
+                    queue.append(m)
+        raise KeyError(f"airway {ident} does not join {entry} to {exit_}")
 
     def runway(self, airport, rwy):
         with open(os.path.join(self.cifp_dir, f"{airport}.dat"), encoding="latin-1") as f:
