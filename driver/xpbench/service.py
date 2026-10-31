@@ -46,6 +46,8 @@ DEFAULTS = {
     "hands_off_file": "HANDS_OFF",      # if this file exists, nothing starts
     "max_session_s": 2700,
     "default_aircraft": "sr22",
+    "state_file": None,                 # default <runs>/bench_state.json
+    "keep_days": 30,                    # finished sessions older than this are dropped
 }
 
 
@@ -58,6 +60,42 @@ class Bench:
         self.current = None
         self.stop = threading.Event()
         os.makedirs(cfg["runs"], exist_ok=True)
+        self.state_file = cfg.get("state_file") or os.path.join(cfg["runs"], "bench_state.json")
+        self._load()
+
+    # ---- persistence -------------------------------------------------------------
+    # The queue and every session record survive a restart (SIM3). Before this,
+    # both lived only in memory: restarting the service -- which any driver
+    # change needs -- silently dropped queued requests, and a finished session an
+    # agent had not fetched yet answered 404.
+    def _load(self):
+        if not os.path.exists(self.state_file):
+            return
+        with open(self.state_file, encoding="utf-8") as f:
+            data = json.load(f)
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.cfg["keep_days"])).isoformat()
+        for sid, s in (data.get("sessions") or {}).items():
+            if s.get("state") == "flying":
+                # the service stopped mid-flight; never re-fly it unasked
+                s["state"] = "error"
+                s["result"] = {"outcome": "error", "reason": "service restarted during the session"}
+            if s.get("state") != "queued" and (s.get("submitted") or "") < cutoff:
+                continue
+            self.sessions[sid] = s
+        self.queue = [self.sessions[i] for i in data.get("queue") or []
+                      if i in self.sessions and self.sessions[i].get("state") == "queued"]
+        print(f"state: {len(self.sessions)} session(s), {len(self.queue)} queued, from {self.state_file}",
+              flush=True)
+
+    def _save(self):
+        """Write the state file atomically. Call with ``self.lock`` held."""
+        data = {"queue": [s["id"] for s in self.queue],
+                "sessions": {sid: {k: v for k, v in s.items() if k != "cancel"}
+                             for sid, s in self.sessions.items()}}
+        tmp = self.state_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, self.state_file)
 
     # ---- policy ----------------------------------------------------------------
     def in_window(self, now=None, duration_s=0):
@@ -124,6 +162,7 @@ class Bench:
         with self.lock:
             self.queue.append(s)
             self.sessions[s["id"]] = s
+            self._save()
             return s, len(self.queue)
 
     def cancel(self, sid):
@@ -134,6 +173,7 @@ class Bench:
             if s in self.queue:
                 self.queue.remove(s)
                 s["state"] = "cancelled"
+                self._save()
             elif s is self.current:
                 s["cancel"] = True
             return s
@@ -168,12 +208,15 @@ class Bench:
                 self.current = nxt
                 nxt["state"] = "flying"
                 nxt["started"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+                self._save()
             try:
                 sess = Session(nxt["profile"], nxt["aircraft"], self.cfg["runs"], self.cfg["xplane"],
                                requester=nxt["requester"], issue=nxt["issue"])
                 sess.p.max_s = min(sess.p.max_s, self.cfg["max_session_s"])
                 sess.should_stop = lambda: nxt.get("cancel", False)
                 nxt["run_dir"] = sess.dir
+                with self.lock:
+                    self._save()
                 nxt["result"] = sess.run()
                 nxt["state"] = "finished"
             except Exception as e:
@@ -182,6 +225,7 @@ class Bench:
             finally:
                 with self.lock:
                     self.current = None
+                    self._save()
 
 
 def make_handler(bench):

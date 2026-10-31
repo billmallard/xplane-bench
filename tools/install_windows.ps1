@@ -5,7 +5,8 @@
 #     powershell -ExecutionPolicy Bypass -File tools\install_windows.ps1
 #
 # What it does, and how to undo each:
-#   1. Firewall: allow inbound TCP 8770 to Python, from the QNAP only.
+#   1. Firewall: allow inbound TCP 8770 to Python, from the QNAP (the agents)
+#      and the Beelink bench (its follower polls /health, SIM3).
 #        undo: Remove-NetFirewallRule -DisplayName "xplane-bench service"
 #   2. Startup: a launcher in your Startup folder starts the service at logon
 #      (in your session -- X-Plane needs your desktop and GPU).
@@ -15,7 +16,7 @@
 #   starts while it exists. Delete it to resume.
 param(
     [string]$Repo = (Resolve-Path "$PSScriptRoot\.."),
-    [string[]]$AllowFrom = @("10.110.10.6"),
+    [string[]]$AllowFrom = @("10.110.10.6", "10.110.10.241"),
     [int]$Port = 8770
 )
 $ErrorActionPreference = "Stop"

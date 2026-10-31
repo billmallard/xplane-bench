@@ -92,18 +92,25 @@ class XPlane:
         return bool(self.get("sim/time/paused"))
 
     def pause(self, on=True, wait_s=30):
-        """Pause or unpause and wait until X-Plane reports it. The toggle can
+        """Pause or unpause and wait until X-Plane reports it. The command can
         take several seconds to land after a fresh start, and an air start is
         only initialised on the first unpaused frame (IAS and altitude read 0
-        until then) -- nothing may assume the state before this returns."""
+        until then) -- nothing may assume the state before this returns.
+
+        Uses the explicit pause_on / pause_off commands, never pause_toggle: on
+        a cold start (the 2026-10-29 04:00Z session, X-Plane flying only after
+        51 s) a toggle that lands late is cancelled by the retry toggle sent
+        10 s later, and the sim never unpauses. An explicit command is safe to
+        resend."""
         t0 = time.time()
-        toggled = 0
+        sent = 0
+        name = "sim/operation/pause_on" if on else "sim/operation/pause_off"
         while time.time() - t0 < wait_s:
             if self.paused() == on:
                 return
-            if toggled == 0 or time.time() - toggled > 10:
-                self.cmd("sim/operation/pause_toggle")
-                toggled = time.time()
+            if sent == 0 or time.time() - sent > 5:
+                self.cmd(name)
+                sent = time.time()
             time.sleep(0.5)
         raise XPlaneError(f"sim did not {'pause' if on else 'unpause'} within {wait_s} s")
 

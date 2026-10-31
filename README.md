@@ -59,6 +59,13 @@ Requirements: X-Plane 12.1+ (XPLM 4.1), Visual Studio Build Tools (MSVC),
 Python 3.11+ with PyYAML (and `tzdata` on Windows if `zoneinfo` cannot find
 America/Chicago).
 
+Tests (no X-Plane needed): `cd driver && python -m pytest tests`.
+
+The service keeps its queue and every session record in `<runs>/bench_state.json`,
+so a restart (which any driver change needs) loses nothing. A session that was
+flying when the service stopped comes back as `error` and is never re-flown
+unasked.
+
 ## Licence
 
 Apache-2.0. The X-Plane SDK is fetched at build time under Laminar Research's

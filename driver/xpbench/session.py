@@ -49,6 +49,41 @@ def _dist(a, b):
     return 2 * 3440.065 * math.asin(math.sqrt(h))
 
 
+# Climb speed control (SIM3, Bill 2026-10-29 on AER-809): fly a climb the way a
+# pilot flies a missed -- full power, pitch for climb speed, take the rate that
+# results. The autopilot here only offers VS, so the driver pitches for speed by
+# stepping the commanded rate: down while IAS sags under the target, back up
+# (never past the requested rate) once it recovers.
+CLIMB_BAND_KT = 3.0     # dead band around the speed target
+CLIMB_STEP_FPM = 100.0  # one adjustment
+CLIMB_MIN_FPM = 200.0   # never command less than this while climbing
+CLIMB_ADJUST_S = 3.0    # at most one adjustment this often
+
+
+def climb_rate(cmd_fpm, max_fpm, ias, target_kias):
+    """Next commanded climb rate for one speed-control step (pure, testable).
+    Returns ``cmd_fpm`` unchanged inside the dead band."""
+    if ias < target_kias - CLIMB_BAND_KT and cmd_fpm > CLIMB_MIN_FPM:
+        return max(CLIMB_MIN_FPM, cmd_fpm - CLIMB_STEP_FPM)
+    if ias > target_kias + CLIMB_BAND_KT and cmd_fpm < max_fpm:
+        return min(max_fpm, cmd_fpm + CLIMB_STEP_FPM)
+    return cmd_fpm
+
+
+# Logged during climbs: SIM3 asks why the full-power SR22 made only ~700 fpm
+# at 87 kt (well under book), and the truth log records none of these.
+CONFIG_REFS = {
+    "flaps": "sim/cockpit2/controls/flap_handle_deploy_ratio",
+    "weight_kg": "sim/flightmodel/weight/m_total",
+    "rpm": "sim/cockpit2/engine/indicators/engine_speed_rpm",
+    "prop_rpm": "sim/cockpit2/engine/indicators/prop_speed_rpm",
+    "map_inhg": "sim/cockpit2/engine/indicators/MPR_in_hg",
+    "throttle": "sim/cockpit2/engine/actuators/throttle_ratio_all",
+    "prop": "sim/cockpit2/engine/actuators/prop_ratio_all",
+    "mixture": "sim/cockpit2/engine/actuators/mixture_ratio_all",
+}
+
+
 class Session:
     def __init__(self, profile_path, aircraft="sr22", runs="runs", xplane_root=r"C:\X-Plane 12",
                  requester="cli", issue=None):
@@ -63,6 +98,7 @@ class Session:
         self.launcher = Launcher(xplane_root, log=self.note)
         self.requester, self.issue = requester, issue
         self.xp = None
+        self.kias = None  # current speed target, set by speed()
         self.should_stop = lambda: False
         self.t0 = time.time()
         self.result = {"profile": self.p.name, "aircraft": aircraft, "requester": requester,
@@ -103,8 +139,10 @@ class Session:
         if self.xp.get("sim/cockpit2/autopilot/heading_mode") != 2:
             self.xp.cmd("sim/autopilot/NAV")
 
-    def goto_alt(self, alt_ft, fpm):
+    def goto_alt(self, alt_ft, fpm, max_fpm=None):
         """Climb or descend to ``alt_ft`` at ``fpm`` with altitude capture armed.
+        In a climb, ``supervise_vertical`` then trims the rate for the speed
+        target, up to ``max_fpm`` (default ``fpm``).
 
         Order matters (learned 2026-10-28): ``alt_vs`` engages VS at the
         *current* vertical speed, so the rate is written after the command,
@@ -112,7 +150,9 @@ class Session:
         straight through (or away from) the armed altitude."""
         cur = self.xp.get("sim/flightmodel/position/elevation") * FT_PER_M
         self.xp.set("sim/cockpit2/autopilot/altitude_dial_ft", float(alt_ft))
-        self.vert = {"alt": float(alt_ft), "fpm": abs(fpm), "t": time.time(), "wrong_since": None}
+        self.vert = {"alt": float(alt_ft), "fpm": abs(max_fpm or fpm), "cmd": abs(fpm),
+                     "climb": alt_ft > cur, "t": time.time(), "wrong_since": None,
+                     "adjusted": 0.0, "logged": 0.0}
         if abs(cur - alt_ft) < 60:
             if self.xp.get("sim/cockpit2/autopilot/altitude_hold_status") != 2:
                 self.xp.cmd("sim/autopilot/altitude_hold")
@@ -121,24 +161,50 @@ class Session:
         time.sleep(0.5)
         self.xp.set("sim/cockpit2/autopilot/vvi_dial_fpm", float(abs(fpm) if alt_ft > cur else -abs(fpm)))
         self.note("vertical", to_ft=alt_ft, fpm=fpm, from_ft=round(cur))
+        if self.vert["climb"]:
+            self.log_config("climb start")
+
+    def log_config(self, why):
+        """Flaps, weight, power settings into the timeline (first engine only)."""
+        row = {}
+        for key, ref in CONFIG_REFS.items():
+            try:
+                v = self.xp.get(ref)
+                v = v[0] if isinstance(v, list) else v
+                row[key] = round(float(v), 3)
+            except Exception:
+                row[key] = None
+        self.note(f"config ({why})", **row)
 
     def supervise_vertical(self, st):
-        """Re-command if the aircraft moves away from the armed altitude for 5 s."""
+        """Pitch for the speed target in a climb; re-command if the aircraft
+        moves away from the armed altitude for 5 s."""
         v = getattr(self, "vert", None)
         if not v or st["alt_status"] == 2:
             return
+        now = time.time()
+        if v["climb"] and self.kias and now - v["adjusted"] >= CLIMB_ADJUST_S:
+            new = climb_rate(v["cmd"], v["fpm"], st["ias"], self.kias)
+            if new != v["cmd"]:
+                v["cmd"], v["adjusted"] = new, now
+                self.xp.set("sim/cockpit2/autopilot/vvi_dial_fpm", float(new))
+                self.note("climb rate trimmed for speed", fpm=new, ias=round(st["ias"]), target=self.kias)
+        if v["climb"] and now - v["logged"] >= 15:
+            v["logged"] = now
+            self.log_config("climbing")
         err = v["alt"] - st["alt_ft"]
-        wrong = abs(err) > 100 and (err * st["vs_fpm"] < 0 or abs(st["vs_fpm"]) < 0.3 * v["fpm"])
+        wrong = abs(err) > 100 and (err * st["vs_fpm"] < 0 or abs(st["vs_fpm"]) < 0.3 * v["cmd"])
         if not wrong:
             v["wrong_since"] = None
             return
-        v["wrong_since"] = v["wrong_since"] or time.time()
-        if time.time() - v["wrong_since"] >= 5:
+        v["wrong_since"] = v["wrong_since"] or now
+        if now - v["wrong_since"] >= 5:
             self.note("vertical not converging -- re-commanding", alt_ft=round(st["alt_ft"]),
                       vs=round(st["vs_fpm"]), target=v["alt"])
-            self.goto_alt(v["alt"], v["fpm"])
+            self.goto_alt(v["alt"], v["cmd"], max_fpm=v["fpm"])
 
     def speed(self, kias):
+        self.kias = float(kias)
         self.xp.set("xpbench/speed/target_kias", float(kias))
 
     # ---- the flight ------------------------------------------------------------
@@ -166,8 +232,10 @@ class Session:
         xp.set("xpbench/guard/min_kias", 0.0)
         xp.cmd("xpbench/guard/reset")
         self.speed(self.ac["cruise_kias"])
-        xp.pause(False)
-        xp.wait_flying(0.8 * self.ac["cruise_kias"])
+        # the first unpause after launch is the slow one (cold start: X-Plane
+        # was still settling 30 s after it began flying, 2026-10-29 04:00Z)
+        xp.pause(False, wait_s=120)
+        xp.wait_flying(0.8 * self.ac["cruise_kias"], wait_s=60)
         xp.pause(True)
         # flight plan
         dep = "KSBA" if p.airport != "KSBA" else "KSMX"
