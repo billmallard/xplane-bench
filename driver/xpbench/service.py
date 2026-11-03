@@ -25,6 +25,7 @@ import json
 import os
 import threading
 import time
+import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
@@ -221,7 +222,8 @@ class Bench:
                 nxt["state"] = "finished"
             except Exception as e:
                 nxt["state"] = "error"
-                nxt["result"] = {"outcome": "error", "reason": f"{type(e).__name__}: {e}"}
+                nxt["result"] = {"outcome": "error", "reason": f"{type(e).__name__}: {e}",
+                                 "traceback": traceback.format_exc()}
             finally:
                 with self.lock:
                     self.current = None

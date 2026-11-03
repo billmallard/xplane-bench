@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import time
+import traceback
 
 from . import fmsplan
 from .navdata import NavData, bearing, offset
@@ -567,7 +568,11 @@ class Session:
             ended = self.fly_enroute() if self.start_route_idx is not None else None
             outcome, reason = ended or self.fly()
         except Exception as e:
+            # keep the raising line: "TimeoutError: timed out" alone cannot say
+            # which call timed out (SIM3c, 2026-11-03)
             outcome, reason = "error", f"{type(e).__name__}: {e}"
+            self.result["traceback"] = traceback.format_exc()
+            self.note("exception", traceback=self.result["traceback"])
         finally:
             try:
                 if self.xp:
