@@ -268,6 +268,10 @@ class Session:
         xp.pause(False, wait_s=120)
         xp.wait_flying(0.8 * self.ac["cruise_kias"], wait_s=60)
         xp.pause(True)
+        if xp.stalls:
+            # X-Plane stopped answering for a while as it settled (SIM3c); kept
+            # so the timeline shows how often, and the wait budget absorbed it
+            self.note("web api stalls", n=xp.stalls)
         # flight plan
         rwy = next((l.fix for l in self.app.legs if l.fix.startswith("RW")), None) if self.app else None
         dest_pos = nav.runway(p.airport, rwy or self._any_rwy(p.airport))

@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -34,6 +35,18 @@ class XPlaneError(Exception):
     pass
 
 
+def _stalled(e):
+    """True for a web API call that timed out with X-Plane still running.
+
+    X-Plane stops answering its web API for tens of seconds while it settles
+    after a launch (SIM3c: three of four launches on 2026-11-07, all inside
+    ``pause(False)``). A read timeout arrives as a bare ``TimeoutError``, and a
+    connect timeout as a ``URLError`` wrapping one."""
+    if isinstance(e, TimeoutError):
+        return True
+    return isinstance(e, urllib.error.URLError) and isinstance(e.reason, TimeoutError)
+
+
 class XPlane:
     """Thin client for the X-Plane 12 web API (v3). Use 127.0.0.1: on Windows
     ``localhost`` tries IPv6 first and costs ~1 s per call."""
@@ -42,6 +55,7 @@ class XPlane:
         self.base = base
         self.timeout = timeout
         self._ids = {}
+        self.stalls = 0  # web API calls that timed out inside a wait loop
 
     def call(self, method, path, body=None, timeout=None):
         data = json.dumps(body).encode() if body is not None else None
@@ -101,26 +115,49 @@ class XPlane:
         a cold start (the 2026-10-29 04:00Z session, X-Plane flying only after
         51 s) a toggle that lands late is cancelled by the retry toggle sent
         10 s later, and the sim never unpauses. An explicit command is safe to
-        resend."""
+        resend.
+
+        A call that times out counts as "not yet", not as a failure. The wait
+        budget, not one call's timeout, decides when to give up (SIM3c)."""
         t0 = time.time()
         sent = 0
         name = "sim/operation/pause_on" if on else "sim/operation/pause_off"
+        n0, last = self.stalls, None
         while time.time() - t0 < wait_s:
-            if self.paused() == on:
-                return
-            if sent == 0 or time.time() - sent > 5:
-                self.cmd(name)
-                sent = time.time()
+            try:
+                if self.paused() == on:
+                    return
+                if sent == 0 or time.time() - sent > 5:
+                    self.cmd(name)
+                    sent = time.time()
+            except Exception as e:
+                if not _stalled(e):
+                    raise
+                self.stalls += 1
+                last = e
             time.sleep(0.5)
-        raise XPlaneError(f"sim did not {'pause' if on else 'unpause'} within {wait_s} s")
+        raise XPlaneError(f"sim did not {'pause' if on else 'unpause'} within {wait_s} s"
+                          + self._stall_note(n0, last))
 
     def wait_flying(self, min_kias, wait_s=30):
         t0 = time.time()
+        n0, last = self.stalls, None
         while time.time() - t0 < wait_s:
-            if self.get("sim/flightmodel/position/indicated_airspeed") >= min_kias:
-                return
+            try:
+                if self.get("sim/flightmodel/position/indicated_airspeed") >= min_kias:
+                    return
+            except Exception as e:
+                if not _stalled(e):
+                    raise
+                self.stalls += 1
+                last = e
             time.sleep(0.5)
-        raise XPlaneError(f"airspeed never reached {min_kias} KIAS after unpause")
+        raise XPlaneError(f"airspeed never reached {min_kias} KIAS after unpause"
+                          + self._stall_note(n0, last))
+
+    def _stall_note(self, n0, last):
+        n = self.stalls - n0
+        return f" ({n} web API call(s) timed out; last: {last})" if n else ""
 
 
 class Launcher:
