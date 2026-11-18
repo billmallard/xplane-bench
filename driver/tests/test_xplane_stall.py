@@ -91,3 +91,34 @@ def test_wait_flying_survives_a_stall(clock):
     xp = StallingXPlane(clock, stall=1)
     xp.wait_flying(100, wait_s=60)
     assert xp.stalls == 1
+
+
+class StuckXPlane(StallingXPlane):
+    """Unpaused and answering, but the flight model is not running: IAS and
+    sim time stand still (the 2026-11-18 cold-start failure's open question)."""
+
+    def get(self, name):
+        if name == "sim/time/paused":
+            return 0
+        if name == "sim/time/total_running_time_sec":
+            return 42.0
+        if name == "sim/flightmodel/position/elevation":
+            return 2286.0  # 7500 ft
+        return 3.0  # indicated airspeed
+
+
+def test_wait_flying_returns_the_time_it_took(clock):
+    xp = StallingXPlane(clock, stall=1)
+    assert xp.wait_flying(100, wait_s=60) == pytest.approx(10.5)  # one 10 s stall + one 0.5 s poll
+
+
+def test_wait_flying_failure_says_what_the_sim_was_doing(clock):
+    xp = StuckXPlane(clock, stall=0)
+    with pytest.raises(XPlaneError) as e:
+        xp.wait_flying(88.0, wait_s=180)
+    msg = str(e.value)
+    assert "within 180 s" in msg
+    assert "last IAS 3.0 KIAS" in msg
+    assert "paused false" in msg
+    assert "sim time advanced 0.0 s in 180 s" in msg
+    assert "altitude 7500 ft" in msg

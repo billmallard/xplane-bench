@@ -265,8 +265,15 @@ class Session:
         self.speed(self.ac["cruise_kias"])
         # the first unpause after launch is the slow one (cold start: X-Plane
         # was still settling 30 s after it began flying, 2026-10-29 04:00Z)
+        # and the first climb to speed can be slow too: on 2026-11-18 the first
+        # launch after the 12.4.4 update took 68 s to fly and then failed a 60 s
+        # speed wait. 180 s covers a slow cold start; the timeline keeps the
+        # real times so a creeping start shows before it fails again.
+        t_unpause = time.time()
         xp.pause(False, wait_s=120)
-        xp.wait_flying(0.8 * self.ac["cruise_kias"], wait_s=60)
+        t_speed = xp.wait_flying(0.8 * self.ac["cruise_kias"], wait_s=180)
+        self.note("up to speed", unpause_s=round(time.time() - t_unpause - t_speed, 1),
+                  speed_s=round(t_speed, 1))
         xp.pause(True)
         if xp.stalls:
             # X-Plane stopped answering for a while as it settled (SIM3c); kept

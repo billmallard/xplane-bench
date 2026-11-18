@@ -139,13 +139,32 @@ class XPlane:
         raise XPlaneError(f"sim did not {'pause' if on else 'unpause'} within {wait_s} s"
                           + self._stall_note(n0, last))
 
+    SIM_TIME = "sim/time/total_running_time_sec"
+
+    def _try_get(self, name):
+        """One read for a diagnostic: None instead of an exception."""
+        try:
+            return self.get(name)
+        except Exception:
+            return None
+
     def wait_flying(self, min_kias, wait_s=30):
+        """Wait until indicated airspeed reaches ``min_kias``; return the seconds
+        it took. On failure the message says what the sim was doing, so "the
+        flight model never ran" (sim time stood still, or still paused) reads
+        differently from "it ran but did not accelerate" (2026-11-18: a slow
+        cold start after the 12.4.4 update failed here with no other clue)."""
         t0 = time.time()
-        n0, last = self.stalls, None
+        n0, last, ias, sim0 = self.stalls, None, None, None
         while time.time() - t0 < wait_s:
             try:
-                if self.get("sim/flightmodel/position/indicated_airspeed") >= min_kias:
-                    return
+                ias = self.get("sim/flightmodel/position/indicated_airspeed")
+                if ias >= min_kias:
+                    return time.time() - t0
+                if sim0 is None:
+                    # first answer, not before it: a stalled read here would
+                    # be swallowed by _try_get and drop out of the stall count
+                    sim0 = self._try_get(self.SIM_TIME)
             except Exception as e:
                 if not _stalled(e):
                     raise
@@ -153,7 +172,22 @@ class XPlane:
                 last = e
             time.sleep(0.5)
         raise XPlaneError(f"airspeed never reached {min_kias} KIAS after unpause"
+                          f" within {wait_s} s ({self._flying_note(ias, sim0, wait_s)})"
                           + self._stall_note(n0, last))
+
+    def _flying_note(self, ias, sim0, wait_s):
+        parts = ["last IAS " + ("unread" if ias is None else f"{ias:.1f} KIAS")]
+        paused = self._try_get("sim/time/paused")
+        parts.append("paused " + ("unread" if paused is None else str(bool(paused)).lower()))
+        sim1 = self._try_get(self.SIM_TIME)
+        if sim0 is None or sim1 is None:
+            parts.append("sim time unread")
+        else:
+            parts.append(f"sim time advanced {sim1 - sim0:.1f} s in {wait_s} s")
+        alt = self._try_get("sim/flightmodel/position/elevation")
+        if alt is not None:
+            parts.append(f"altitude {alt / 0.3048:.0f} ft")
+        return ", ".join(parts)
 
     def _stall_note(self, n0, last):
         n = self.stalls - n0
